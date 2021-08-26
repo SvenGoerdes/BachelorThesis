@@ -1,0 +1,218 @@
+---
+title: "CountyCluster"
+output: html_document
+---
+
+```{r}
+CBP <- fread("G:/BA Daten/Final/BusinessPattern/CountyBusiness.txt ")
+```
+
+
+
+```{r}
+CBP[,code := substr(CBP$naics,start = 3 , stop = 6 )]
+
+# Only want the pattern on a summary level | not going into detail
+CBP_summary = CBP[code == "----"]
+
+
+
+### Reshape 
+CBP_PC = CBP_summary[,c(1,2,3,5)]
+
+CBP_K_means <-  reshape(CBP_PC, idvar = c("fipstate","fipscty"),timevar = "naics",direction = "wide")
+
+```
+
+```{r Calculate relative values }
+# Getting rid of the --- and . in the names 
+names(CBP_K_means) = str_remove_all(names(CBP_K_means), "[.-]") # removes all given characters
+
+CBP_K_means[is.na(CBP_K_means)] = 0
+# calculating the relative values 
+
+emp_vector = as.vector(CBP_K_means$emp)
+industrymatrix = as.matrix(CBP_K_means[,-c(1,2,3)])
+
+
+Countyrel_industry = industrymatrix / emp_vector
+  
+## The different sections in relative values to the general employment number 
+Countyrel_industry  = Countyrel_industry *100
+
+
+
+industry_county_names = cbind(CBP_K_means$fipstate,CBP_K_means$fipscty)
+
+                   
+CRelativeValues = cbind(industry_county_names,Countyrel_industry)
+CRelativeValues = as.data.table(CRelativeValues)
+
+CRelativeValues = CRelativeValues %>%
+  rename(
+    fipsstate = V1,
+    fipscty = V2
+  )
+
+
+rm(list =c("emp_vector","industrymatrix","industry_county_names"))
+   
+   
+# some counties dont classify a couple of employment categories --> Hence it doesn't result in Relative Values
+apply(CRelativeValues[,c(-1,-2)],1,sum)
+
+# Create fips 
+CRelativeValues[,countyfips:= sprintf("%03d",CRelativeValues[,fipscty])]
+CRelativeValues[,fips := paste0(fipsstate,countyfips)]
+
+
+
+```
+
+
+```{r Cluster counties which are availabe in CountyMerged}
+
+fipsavailabe <- unique(CountyMedianMerged[,"fips"])
+CRelativeValues <- CRelativeValues[fips %in% fipsavailabe]
+```
+
+
+```{r Clustering wit kmeans}
+
+
+CountyKmeans <- kmeans(CRelativeValues[,c(-1,-2,-23,-24)],4,nstart = 35)
+CountyRelativeValues <- CRelativeValues
+CountyRelativeValues$cluster = as.character(CountyKmeans$cluster)
+
+
+
+# Create fips 
+# CountyRelativeValues[,countyfips:= sprintf("%03d",CountyRelativeValues[,fipscty])]
+# CountyRelativeValues[,fips := paste0(fipsstate,countyfips)]
+# attach to MyPanelCluster
+# MyPanelCluster <- sqldf("Select m.*,c.cluster from MyPanel as m inner join relative_values as c on c.state = m.state")
+head(CountyRelativeValues)
+```
+
+
+
+```{r elbow criterion}
+sumofsquares = rep(0,20)
+for ( i in 1:20){
+  sumofsquares[i] <- kmeans(CRelativeValues[,c(-1,-2,-23,-24)],i,nstart = 35)$tot.withinss
+
+
+}
+elbowdata = data.frame(cbind(1:20,sumofsquares))
+
+
+ggplot(elbowdata,aes(x=V1,y=sumofsquares))+
+  geom_point(color="blue")+
+  geom_line()+
+  scale_x_discrete(limits = elbowdata$V1)
+```
+
+```{r rename colnames of CountyRelativeValues}
+
+
+colnames(CountyRelativeValues) <- c("fipsstate", "fipscty","Foodgathering","MiningOil","Utilities","Construction","Manufacturing","Wholesale Trade","RetailTrade","TransportationWaerhousing","Information","FinanceInsurance","RealEstateCo","ProfessionalScientific","Management","Administrative","EducationalService","HealthCare","ArtsEntertainment","AccommodationFoodServices","OtherServices","NotClassified" ,"countyfips", "fips", "cluster")
+```
+
+```{r standard deviation of each value}
+apply(CountyRelativeValues[,-c(1,2,25,24,23)],2,mean)
+
+
+```
+
+
+```{r Principal component for Cluster, eval=FALSE, include=FALSE}
+# read in again 
+
+CountyPC = prcomp(CountyRelativeValues[,c(-1,-2,-23,-24,-25)])
+
+CountyPcData = CountyPC$x
+
+
+CountyPcData <- as.data.table(CountyPcData)
+CountyPcData <- cbind(CountyPcData,cluster = CountyRelativeValues$cluster, fips = CountyRelativeValues$fips)
+
+
+  
+  
+
+
+CountyPcData[,clustername := paste0("cluster", cluster)]
+
+
+
+ggplot(CountyPcData,aes(x=PC1,y=PC2))+
+  geom_point(aes(color=cluster))+
+  labs(
+       x="first Principal Component",
+       y="second Principal Component")
+
+
+
+
+
+
+```
+
+
+```{r Explained variance of Principal Component}
+PcVariance = cumsum(eigen(cor(CRelativeValues[,c(-1,-2,-23,-24)]))$values)
+print(paste0("the first two PC explain ",(100*round(PcVariance[2]/PcVariance[20],4)),"% of the variance"))
+```
+
+
+
+
+
+
+```{r GGplot of Cluster with different k means}
+
+
+for (i in 1:8){
+
+CLoopKmeans <- kmeans(CRelativeValues[,c(-1,-2,-23,-24)],i,nstart = 35)
+
+LoopValues <- CRelativeValues
+LoopValues$cluster = as.character(CLoopKmeans$cluster)
+
+LoopPC = prcomp(LoopValues[,c(-1,-2,-23,-24,-25)])
+
+LoopPcData = LoopPC$x
+
+
+LoopPcData <- as.data.table(LoopPcData)
+LoopPcData <- cbind(LoopPcData,cluster = LoopValues$cluster, fips = LoopValues$fips)
+
+
+# get the absolute and relative data points in each cluster 
+# print(table(LoopPcData$cluster))
+ print(prop.table(table(LoopPcData$cluster)))
+
+
+loopplot <- ggplot(LoopPcData,aes(x=PC1,y=PC2,color=cluster))+
+  geom_point()+
+  labs(subtitle=paste0("k= ",i),
+       x="PC1",
+       y="PC2")
+
+assign(paste0("ClusterPlot",i),loopplot)
+
+
+}
+
+```
+
+```{r Plots in one figure}
+
+library(ggpubr)
+
+
+ggarrange(ClusterPlot3,ClusterPlot4,ClusterPlot5,
+          ClusterPlot6,ncol=2,nrow=2)
+
+```
+

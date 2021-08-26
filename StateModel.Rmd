@@ -1,0 +1,221 @@
+---
+title: "StateModel"
+output: html_document
+---
+
+```{r Save state Data}
+# save DailyPanelModelData
+
+write.csv("")
+
+
+```
+
+```{r create new Panel}
+
+DailyPanelModelData = MedianMerged
+DailyPanelModelData[dailyCases <0 , dailyCases := 0]
+
+
+View(DailyPanelModelData)
+
+# Inverted Resident Variable 
+DailyPanelModelData[,InvResident := Resident*(-1)]
+
+
+## Create lags for cases
+DailyPanelModelData[, c("dailyCaseslag1","dailyCaseslag2","dailyCaseslag3","dailyCaseslag4","dailyCaseslag5","dailyCaseslag6") := 
+                      .(shift(dailyCases, 1L, fill = NA, type = "lag"),
+                        shift(dailyCases, 2L, fill = NA, type = "lag"),
+                        shift(dailyCases, 3L, fill = NA, type = "lag"),
+                        shift(dailyCases, 4L, fill = NA, type = "lag"),
+                        shift(dailyCases, 5L, fill = NA, type = "lag"),
+                        shift(dailyCases, 6L, fill = NA, type = "lag")
+                      ),by = state]
+
+
+
+
+
+# Month extraction
+
+DailyPanelModelData[,month := month(date)]
+DailyPanelModelData[,monthname := paste0("month", month)]
+
+
+
+
+
+#Create growth like in paper from Badr 2020
+DailyPanelModelData[,growth:= 
+                  ( (log(
+                    
+                    (dailyCases+
+                       dailyCaseslag1+
+                       dailyCaseslag2)/3))
+                /
+                  
+                  (log(
+                      (dailyCases+
+                       dailyCaseslag1+
+                       dailyCaseslag2+
+                       dailyCaseslag3+
+                       dailyCaseslag4+
+                       dailyCaseslag5+
+                       dailyCaseslag6)/7)) -1)*100,by = "state"]
+
+
+
+
+
+# Those values that are Infinite because they got divided through zero --> 
+#  set to zero
+DailyPanelModelData[growth == -Inf | growth == Inf , growth := 0]
+
+
+
+
+
+DailyPanelModelData[,weekday := weekdays(DailyPanelModelData[,date])]
+
+# Get Cluster with k= 3
+DailyPanelModelData <- merge(DailyPanelModelData,relative_values[,c("state","cluster")],by = "state")
+DailyPanelModelData <- as.data.table(sqldf("Select p.*,r.cluster from DailyPanelModelData as p
+      inner join relative_values as r 
+      on p.state = r.state"))
+
+
+
+
+
+# rewrite Cluster as character 
+DailyPanelModelData[,clustername := paste0("cluster", cluster)]
+DailyPanelModelData <- cbind(DailyPanelModelData,dummy.code(DailyPanelModelData[,clustername]))
+DailyPanelModelData[,CasesPerPopPercent := CasesPerPop*100]
+
+
+
+## get season for each date
+# season function is from BachelorFinal
+DailyPanelModelData[,season := getSeason(date)]
+
+
+
+```
+
+
+
+```{r}
+for ( i in c(7,14,21,28,35,42,49)) {
+  
+  
+  
+  DailyModelPooling <- plm(growth~
+                             lag(growth,1)+
+                             lag(growth,2)+
+                             lag(InvResident,i)+
+                             lag(InvResident,i+1)+
+                             lag(medianTemp,i)+
+                             # lag(medianTemp,i+1)+  
+                             lag(medianPrcp,i)+
+                             # lag(medianPrcp,i+1)+
+                             lag(medianSnow,i)+
+                             # lag(medianSnow,i+1)+
+                             season+
+                             # monthname+
+                             vaccinatedPercent+
+                             CasesPerPopPercent+
+                             weekday+
+                             # covidTests+
+                             CasesPerPopPercent+
+                             cluster1+
+                             cluster2
+                           
+                           ,data= DailyPanelModelData[CasesPerPop >1/1000],index= c("state","date"), model ="pooling")
+  # names(DailyModelPooling$coefficients)[2:3] = c("L.growth","L2.growth")
+  
+  
+  
+ 
+ 
+  
+  
+  # assign(paste0("DailyModelPooling2",i),DailyModelPooling)
+  # assign(paste0("DailyModelPoolingRobust",i),coeftest(DailyModelPooling,vcov = vcovHC, type= "HC1")) # get robust SE  
+  # assign(paste0("robustCoef",i),coeftest(DailyModelPooling,vcov = vcovHC, type= "HC1"))
+  # print(coeftest(DailyModelPooling,vcov = vcovHC, type= "HC1"))
+   print(summary(DailyModelPooling))
+  print(i)
+  # print(DailyModelPooling$coefficients["lag(medianTemp, i)"])
+  
+  
+  
+#   print(DailyModelPooling$coefficients["seasonSpring "])
+#   print(DailyModelPooling$coefficients["seasonSummer"])
+#   print(DailyModelPooling$coefficients["seasonWinter"])
+}
+
+```
+```{r Stargazer}
+library(stargazer)
+
+stargazer(robustCoef7,robustCoef14,robustCoef21,robustCoef28,robustCoef35,robustCoef42,robustCoef49,
+          
+          column.labels = c("one","two","three","four","five","six","seven"),
+          title="Regression with lagged 1 to 7 week variables",
+          column.sep.width = "-10pt",
+          omit.stat=c("f", "ser")
+         
+           ,covariate.labels = 
+            c("L.growth", "L2.Growth",
+              "Lt.InvResident","Lt+1day.InvResident",
+              "Lt.Temp",
+              "Lt.Prcp",
+              "Lt.Snow",
+              "Spring",
+              "Summer",
+              "Winter",  
+              "vaccinePerCapita",
+              "CasesPerPopPercent",
+              "Thursday","Friday","Wednesday","Monday", "Saturday","Sunday",
+              "cluster 1","cluster2","Intercept" )
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+stargazer(DailyModelPooling27,DailyModelPooling214,DailyModelPooling221,DailyModelPooling228,DailyModelPooling235,DailyModelPooling242,DailyModelPooling249,
+          column.labels = c("one","two","three","four","five","six","seven"),
+          title="Regression with lagged 1 to 7 week variables",
+          column.sep.width = "-10pt",
+          omit.stat=c("f", "ser")
+         
+           ,covariate.labels = 
+            c("L.growth", "L2.Growth",
+              "Lt.InvResident","Lt+1day.InvResident",
+              "Lt.Temp",
+              "Lt.Prcp",
+              "Lt.Snow",
+              "Spring",
+              "Summer",
+              "Winter",  
+              "vaccinePerCapita",
+              "CasesPerPopPercent",
+              "Thursday","Friday","Wednesday","Monday", "Saturday","Sunday",
+              "cluster 1","cluster2","Intercept" )
+)
+
+
+```
+
+

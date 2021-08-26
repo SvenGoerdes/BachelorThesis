@@ -1,0 +1,573 @@
+---
+title: "County Model"
+output: pdf_document
+---
+
+```{r}
+setwd("G:/BA Daten/Stations_csv")
+CountyStations <- fread("USstationscounty.csv")
+```
+
+```{r Weather for county level}
+# bind county to weather dataframes
+countytemp <- sqldf("Select t.*,c.countyfips,c.countyname from temperature as t
+      inner join CountyStations as c
+      on c.state = t.ST
+      and c.station = t.ID
+      ")
+
+countyprcp <- sqldf("Select p.*,c.countyfips,c.countyname from precipitation as p
+      inner join CountyStations as c
+      on c.state = p.ST
+      and c.station = p.ID
+      ")
+
+
+countysnow <- sqldf("Select s.*,c.countyfips,c.countyname from snow as s
+      inner join CountyStations as c
+      on c.state = s.ST
+      and c.station = s.ID
+      ")
+
+```
+
+```{r County median}
+CountyMedianTemperature = data.frame(countytemp %>% group_by(countyfips,TIME) %>% summarise(medianTemp=median(VALUE)))
+CountyMedianPrecipitation = data.frame(countyprcp %>% group_by(countyfips,TIME) %>% summarise(medianPrcp=median(VALUE)))
+CountyMedianSnow = data.frame(countysnow %>% group_by(countyfips,TIME) %>% summarise(medianSnow=median(VALUE)))
+```
+
+
+```{r county covid data}
+# setwd("G:/BA Daten/Final/Covid")
+# CountyCovid <- fread("Covid_counties.csv")
+
+
+setwd("G:/BA Daten/Final/Merged")
+CountyCovidMobility <- fread("CountyCovidMobility.csv")
+
+
+```
+```{r Mobility data}
+setwd("G:/BA Daten/Final/Mobility_report")
+CountyMobility <- fread("CountyMobility.csv")
+
+```
+ 
+```{r merge Weather  }
+
+CountyMedianWeather <- sqldf("Select t.*,p.medianPrcp,s.medianSnow
+      from CountyMedianTemperature as t
+      
+      inner join
+      CountyMedianPrecipitation as p
+      on t.countyfips = p.countyfips
+      and t.TIME = p.TIME
+      
+      inner join CountyMedianSnow as s
+      on t.countyfips = s.countyfips
+      and t.TIME = s.TIME")
+
+CountyMedianWeather <- as.data.table(CountyMedianWeather )
+CountyMedianWeather[,date := ymd(TIME)]
+
+```
+
+```{r get Population}
+CountyPopulation <- fread("G:/BA Daten/Final/CensusEstimation/CountyPopulation.csv")
+
+# add zeros before county column 
+CountyPopulation[,County := sprintf("%03d",CountyPopulation[,COUNTY])]
+
+CountyPopulation[,fips :=  paste0(as.character(STATE),County)]
+
+
+CountyPopulation[,COUNTY := NULL]
+
+
+
+
+```
+
+
+```{r Bind CovidMobility with Weather}
+
+CountyMedianMerged <- sqldf("Select M.state,
+M.county,
+M.fips,
+M.date,
+M.cases,
+M.deaths,
+M.RetailandRecreation,
+M.GroceryPharmacy,
+M.Parks,
+M.Transit,
+M.Work,
+M.Resident,
+W.medianPrcp,
+W.medianSnow,
+W.medianTemp
+
+
+      from CountyMedianWeather as W 
+      inner join CountyCovidMobility as M
+      on M.fips = W.countyfips
+      and M.date = W.date
+      
+      ")
+
+
+```
+
+
+```{r bind population}
+CountyMedianMerged <- sqldf("Select m.*,p.POPESTIMATE2019 as population 
+
+  from CountyMedianMerged as m
+  left join CountyPopulation as p
+  on m.fips= p.fips")
+```
+
+```{r vaccination data}
+# Vaccination on statelevel
+```
+
+
+```{r Bind vaccination to counties }
+# Bind cluster to counties 
+
+CountyMedianMerged <- sqldf("Select f.V2 as short,
+      m.*,
+      v.Series_Complete_Pop_Pct as vaccinatedPercent
+      
+      
+      from CountyMedianMerged as m
+      
+      inner join fips as f 
+      on m.state = f.V1
+      
+      
+      
+      left join vaccination as v
+      on 
+      v.Date = m.date
+      and v.location = f.V2
+      
+      
+    ")
+CountyMedianMerged <- as.data.table(CountyMedianMerged)
+
+
+CountyMedianMerged$vaccinatedPercent[is.na(CountyMedianMerged$vaccinatedPercent)] <- 0.0
+
+```
+
+```{r Cluster to counties}
+# out of CountyBusiness.RMD data
+# CountyMedianMerged <- sqldf("Select m.*,c.cluster
+#       
+#       from CountyMedianMerged as m
+#       inner join CountyRelativeValues as c
+#       on m.fips = c.fips")
+
+
+CountyMedianMerged <- merge(CountyMedianMerged,CountyRelativeValues[,c("fips","cluster")],by = "fips")
+CountyMedianMerged <- as.data.table(CountyMedianMerged)
+
+```
+
+```{r DailyCases and cases per Pop}
+
+
+CountyMedianMerged[,dailyCases := cases-dplyr::lag(cases),by = fips]
+CountyMedianMerged[,CasesPerPop := (cases/population)]
+```
+
+```{r Daily Tests only state level}
+CountyMedianMerged <- sqldf("Select m.*, t.tests_combined_total as covidTests
+      from CountyMedianMerged as m 
+      inner join covidTest as t
+      on m.date = t.date
+      and m.short = t.state
+      ")
+
+CountyMedianMerged <- as.data.table(CountyMedianMerged)
+```
+
+
+```{r from UNIX to date}
+CountyMedianMerged[,date:= as.Date(date)]
+```
+
+
+```{r Fips to Character for merging}
+CountyMedianMerged[,fips := as.character(fips)]
+```
+
+
+```{r cluster merge }
+# merge cluster 
+CountyMedianMerged <- merge(CountyMedianMerged,CountyRelativeValues[,c("fips","cluster")],by = "fips")
+
+# Chj
+View(sqldf("Select Cm.fips,Cm.date,Cm.clustername,R.cluster as Clustervergleich
+     from CountyMedianMerged as Cm
+      inner join CountyRelativeValues as R
+       on R.fips = Cm.fips "))
+
+
+
+```
+
+```{r}
+# easy to use just factor instead of creating dummy variables 
+CountyMedianMerged[,clustername := paste0("cluster", cluster)]
+```
+
+```{r season dummy variable}
+CountyMedianMerged[,season := getSeason(date)]
+```
+
+
+```{r Weekday dummy}
+CountyMedianMerged[,weekday := weekdays(date)]
+```
+
+```{r CasesPerPop }
+CountyMedianMerged[,CasesPerPopPercent := CasesPerPop*100]
+```
+
+```{r Inverse Resident}
+
+CountyMedianMerged[,InvResident := Resident*(-1)]
+
+```
+
+
+```{r Temperature to celcius }
+# CountyMedianMerged[,medianTemp := (medianTemp*100)]
+
+```
+
+
+
+```{r Create Model, include=FALSE}
+
+
+CountyPanel <- as.data.table(CountyMedianMerged)
+
+CountyPanel[dailyCases <0 , dailyCases := 0]
+
+#create Dummy variable for cluster 
+
+# CountyPanel <- merge(CountyPanel,CountyRelativeValues[,c("fips","cluster")],by = "fips")
+
+CountyPanel[, c("dailyCaseslag1","dailyCaseslag2","dailyCaseslag3","dailyCaseslag4","dailyCaseslag5","dailyCaseslag6") := 
+                      .(shift(dailyCases, 1L, fill = NA, type = "lag"),
+                        shift(dailyCases, 2L, fill = NA, type = "lag"),
+                        shift(dailyCases, 3L, fill = NA, type = "lag"),
+                        shift(dailyCases, 4L, fill = NA, type = "lag"),
+                        shift(dailyCases, 5L, fill = NA, type = "lag"),
+                        shift(dailyCases, 6L, fill = NA, type = "lag")
+                      ),by = fips]
+
+
+
+
+# CountyPanel[,weekday := weekdays(date)]
+
+CountyPanel[,growth:= 
+                  ((log(
+                    
+                    (dailyCases+
+                       dailyCaseslag1+
+                       dailyCaseslag2)/3))
+                /
+                  
+                  (log(
+                      (dailyCases+
+                       dailyCaseslag1+
+                       dailyCaseslag2+
+                       dailyCaseslag3+
+                       dailyCaseslag4+
+                       dailyCaseslag5+
+                       dailyCaseslag6)/7))-1)*100,by = "fips"]
+
+
+
+
+ 
+
+
+
+
+
+
+CountyPanel[growth == -Inf | growth == Inf , growth := 0]
+
+
+
+
+
+
+# CountyPanel[,clustername := paste0("cluster", cluster)]
+# CountyPanel[,CasesPerPopPercent := CasesPerPop*100]
+# CountyPanel <- cbind(CountyPanel,dummy.code(CountyPanel[,clustername]))
+
+
+
+
+
+for ( i in c(7,14,21,28,35,42,49)) {
+  
+  
+  
+  CountyPooling <- plm(growth~
+                             lag(growth,1)+
+                             lag(growth,2)+
+                             lag(Resident,i)+
+                             lag(Work,i+1)+
+                             lag(medianTemp,i)+
+                             # lag(medianTemp,i+1)+  
+                             lag(medianPrcp,i)+
+                             # lag(medianPrcp,i+1)+
+                             lag(medianSnow,i)+
+                             # lag(medianSnow,i+1)+
+                             factor(season)+
+                             vaccinatedPercent+
+                             CasesPerPopPercent+
+                             weekday+
+                             # covidTests+
+                            clustername
+                           
+                           
+                           ,data= CountyPanel[CasesPerPop >1/1000],index= c("fips","date"), model ="pooling")
+  # names(DailyModelPooling$coefficients)[2:3] = c("L.growth","L2.growth")
+ 
+  
+  
+ 
+  
+  
+  
+  
+  
+  # assign(paste0("DailyModelPooling2",i),DailyModelPooling)
+  
+  
+  print(summary(CountyPooling))
+  print(i)
+
+print(lmtest::bptest(CountyPooling))
+}
+
+
+
+
+
+
+
+```
+
+```{r}
+
+CountyPanel[,InvResident := Resident*(-1)]
+CountyPanel[,season := getSeason(date)]
+CountyPanel[,CasesPerPopPercent := CasesPerPop*100]
+for ( i in c(7,14,21,28,35,42,49)) {
+  
+  
+  
+  CountyPooling <- plm(growth~
+                             lag(growth,1)+
+                             lag(growth,2)+
+                             lag(InvResident,i)+
+                             lag(InvResident,i+1)+
+                             lag(medianTemp,i)+
+                             # lag(medianTemp,i+1)+  
+                             lag(medianPrcp,i)+
+                             # lag(medianPrcp,i+1)+
+                             lag(medianSnow,i)+
+                             # lag(medianSnow,i+1)+
+                             season+
+                             vaccinatedPercent+
+                             CasesPerPopPercent+
+                             weekday+
+                             # covidTests+
+                            clustername
+                           
+                           
+                           ,data= CountyPanel[CasesPerPop >1/1000],index= c("fips","date"), model ="pooling")
+  # names(DailyModelPooling$coefficients)[2:3] = c("L.growth","L2.growth")
+ 
+  
+  
+ 
+  # robust = coeftest(CountyPooling,vcov = vcovHC, type= "HC1")
+  
+  
+  
+  
+  # assign(paste0("DailyModelPooling2",i),DailyModelPooling)
+  
+  # assign(paste0("CountyRobustCoef",i),robust)
+  print(summary(CountyPooling))
+  print(i)
+
+  # print(robust)
+}
+
+
+```
+
+
+```{r stargazer for Latex}
+library(stargazer)
+
+stargazer(CountyRobustCoef7,CountyRobustCoef14,CountyRobustCoef21,CountyRobustCoef28,CountyRobustCoef35,CountyRobustCoef42,CountyRobustCoef49,
+          
+          column.labels = c("one","two","three","four","five","six","seven"),
+          title="Regression with lagged 1 to 7 week variables",
+          column.sep.width = "-10pt",
+          omit.stat=c("f", "ser")
+         
+           ,covariate.labels = 
+            c("L.growth", "L2.Growth",
+              "Lt.InvResident","Lt+1day.InvResident",
+              "Lt.Temp",
+              "Lt.Prcp",
+              "Lt.Snow",
+              "Spring",
+              "Summer",
+              "Winter",  
+              "vaccinePerCapita",
+              "CasesPerPopCapita",
+              "Thursday","Friday","Wednesday","Monday", "Saturday","Sunday",
+              "cluster 2","cluster3","cluster4",
+              "Intercept" )
+          
+          )
+
+
+
+
+```
+
+
+
+
+
+
+
+```{r}
+# # rolling sums 
+#   
+# 
+# 
+#  CountyRoll <- CountyMedianMerged %>% group_by(fips) %>% mutate(
+#   
+#   R_Retail =        rollapplyr(RetailandRecreation,7,mean,partial=TRUE),
+#   
+#   R_Grocery =       rollapplyr(GroceryPharmacy,7,mean,partial=TRUE),
+#   
+#   R_Parks =         rollapplyr(Parks,7,mean,partial=TRUE),
+#   
+#   R_Transit =       rollapplyr(Transit,7,mean,partial=TRUE),
+#   
+#   R_Work =          rollapplyr(Work,7,mean,partial=TRUE),
+#   
+#   R_Resident =      rollapplyr(Resident,7,mean,partial=TRUE),
+#   
+#   # R_Deaths =        rollapplyr(dailyDeaths,7,sum,partial=TRUE), 
+#   
+#   R_DailyCases =    rollapplyr(dailyCases,7,sum,partial=TRUE),
+#                     
+#   R_CovidTests =    rollapplyr(covidTests,7,sum,partial=TRUE),
+#   
+#   R_Prcp =          rollapplyr(medianPrcp,7,mean,partial=TRUE),
+#   
+#   R_Temp =          rollapplyr(medianTemp,7,mean,partial=TRUE),
+#   
+#   R_Snow =          rollapplyr(medianSnow,7,mean,partial=TRUE))%>% 
+#   
+#   ungroup()
+#   
+# CountyRoll <- as.data.table(CountyRoll)
+# WeeklyPanel <- CountyRoll[weekday == 'Sonntag']
+
+```
+
+
+
+```{r Weekly Model}
+WeeklyPanel[,growth:= R_DailyCases/dplyr::lag(R_DailyCases),by= 'fips']
+
+WeeklyPanel[,CasesPerPopPercent := CasesPerPop*100]
+WeeklyPanel <- merge(WeeklyPanel,CountyRelativeValues[,c("fips","cluster")],by = "fips")
+
+WeeklyPanel[gr]
+
+
+WeeklyPanel[growth == -Inf | growth == Inf , growth := 0]
+
+
+CountyWeekModel <- plm(growth ~
+                         lag(growth)+
+                         lag(growth,2)+
+                         lag(R_Work,1)+
+                         lag(R_Temp)+
+                         lag(R_Prcp)+
+                         lag(R_Snow)+
+                         CasesPerPopPercent+
+                         factor(cluster.y),
+                         
+                         
+                         data=WeeklyPanel,
+                         index= c("fips","date"),
+                         model="within"
+                          
+                         
+                         
+                         
+                         
+                         )
+  
+summary(CountyWeekModel)  
+  
+  
+```
+
+
+
+
+
+```{r Compare cluster values}
+
+## Standardize 
+CompareIndustry <- scale(CountyRelativeValues[,c(-1,-2,-23,-24,-25)],center= TRUE,scale = TRUE)
+
+CompareIndustry <- as.data.table(CompareIndustry)  
+CompareIndustry <- cbind(CompareIndustry,cluster = CountyRelativeValues[,cluster])   
+
+
+
+colMeans(CompareIndustry[cluster %in% c(1,4)][,c(1:20)]) - colMeans(CompareIndustry[cluster %in% c(2,3)][,c(1:20)])
+  
+
+
+  
+apply(CountyRelativeValues[cluster %in% c(1,4)][,c(-1,-2,-23,-24,-25)],2,mean)-apply(CountyRelativeValues[cluster %in% c(2,3)][,c(-1,-2,-23,-24,-25)],2,mean)
+
+
+StandardizeValues <- cbind(1:20,colMeans(CompareIndustry[cluster %in% c(1,4)][,c(1:20)]),
+    colMeans(CompareIndustry[cluster %in% c(2,3)][,c(1:20)]),
+    (colMeans(CompareIndustry[cluster %in% c(1,4)][,c(1:20)]) - colMeans(CompareIndustry[cluster %in% 
+                                                                                      c(2,3)][,c(1:20)]))         )
+
+
+```
+
+
+
+
+

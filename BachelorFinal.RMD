@@ -1,0 +1,1116 @@
+---
+title: "Bachelor Thesis Final"
+output: html_notebook
+---
+
+```{r libraries, include=FALSE}
+library(sqldf)
+library(tidyverse)
+library(lubridate)
+library(ggplot2)
+library(plm)
+library(stringr)
+library(zoo)
+library(data.table)
+library(jsonlite)
+library(httr)
+library(parallel)
+library(psych)
+library(lmtest)
+```
+
+
+```{r import covid and mobility}
+setwd("G:/BA Daten/Final/Merged")
+CovidMobility <- read.csv("CovidMobility.csv")
+
+
+CovidMobility$date <- as.Date(CovidMobility$date)
+
+```
+
+```{r import Weather}
+setwd("G:/BA Daten/Final/Weather")
+snow <- fread("Snow.csv")
+precipitation <- fread("Precipitation.csv")
+temperature <- read.csv("Temperature.csv")
+
+
+```
+```{r Calculate the median for snow,prcp,temp}
+
+MedianTemperature = data.frame(temperature %>% group_by(ST,TIME) %>% summarise(medianTemp=median(VALUE)))
+MedianPrecipitation = data.frame(precipitation %>% group_by(ST,TIME) %>% summarise(medianPrcp=median(VALUE)))
+MedianSnow = data.frame(snow %>% group_by(ST,TIME) %>% summarise(medianSnow=median(VALUE)))
+
+
+# join together 
+MedianWeather <- sqldf("Select t.*,p.medianPrcp,s.medianSnow
+      from MedianTemperature as t
+      
+      inner join
+      MedianPrecipitation as p
+      on t.ST = p.ST
+      and t.TIME = p.TIME
+      
+      inner join MedianSnow as s
+      on t.ST = s.ST
+      and t.TIME = s.TIME")
+
+
+
+
+AverageTemperature = data.frame(temperature %>% group_by(ST,TIME) %>% summarise(averageTemp=mean(VALUE)))
+AveragePrecipitation = data.frame(precipitation %>% group_by(ST,TIME) %>% summarise(averagePrcp=mean(VALUE)))
+AverageSnow = data.frame(snow %>% group_by(ST,TIME) %>% summarise(averageSnow=mean(VALUE)))
+
+
+AverageWeather <- sqldf("Select t.*,p.averagePrcp,s.averageSnow
+      from AverageTemperature as t
+      
+      inner join
+      AveragePrecipitation as p
+      on t.ST = p.ST
+      and t.TIME = p.TIME
+      
+      inner join AverageSnow as s
+      on t.ST = s.ST
+      and t.TIME = s.TIME")
+
+rm(list = c("AveragePrecipitation","AverageSnow","AverageTemperature","MedianPrecipitation","MedianSnow","MedianTemperature"))
+
+
+rm(list=c("precipitation","snow","temperature"))
+```
+
+
+```{r format median and average data}
+# format to date
+MedianWeather <- as.data.table(MedianWeather)
+MedianWeather[,date:= ymd(TIME)]
+MedianWeather[,TIME:=NULL]
+
+MedianWeather <- MedianWeather %>% select(date,ST:medianSnow)
+
+
+# format to date
+AverageWeather <- as.data.table(AverageWeather)
+AverageWeather[,date:= ymd(TIME)]
+AverageWeather[,TIME:=NULL]
+
+AverageWeather <- AverageWeather %>% select(date,ST:averageSnow)
+
+
+
+
+```
+
+
+```{r Add fips to Weather Tables}
+setwd("G:/BA Daten/Final/Station")
+
+fips <- fread("States_fips_code.csv")
+
+
+MedianWeather <- sqldf("Select w.*,f.V1 as state,f.V3 as fips 
+      from MedianWeather as w
+      inner join fips as f 
+      on w.ST = f.V2")
+
+AverageWeather <- sqldf("Select w.*,f.V1 as state,f.V3 as fips 
+      from AverageWeather as w
+      inner join fips as f 
+      on w.ST = f.V2")
+
+
+
+#rearrange 
+MedianWeather <- MedianWeather %>% select(date,state,ST,fips,medianTemp:medianSnow)
+AverageWeather <- AverageWeather %>% select(date,state,ST,fips,averageTemp:averageSnow)
+
+
+
+```
+
+
+
+
+
+```{r Correlation between climate data}
+# Average and Median 
+
+# Temperature
+cor(MedianWeather$medianTemp,AverageWeather$averageTemp)
+
+# Snow
+cor(MedianWeather$medianSnow,AverageWeather$averageSnow)
+
+#Precipitation
+cor(MedianWeather$medianPrcp,AverageWeather$averagePrcp)
+
+
+
+
+```
+
+```{r join weather with CovidMobility}
+
+MedianMerged <- sqldf("Select c.*,w.medianTemp,w.medianPrcp,w.medianSnow
+      from CovidMobility as c
+      
+      inner join MedianWeather as w
+      on c.fips = w.fips
+      and c.date = w.date")
+
+
+
+AverageMerged <- sqldf("Select c.*,w.averageTemp,w.averagePrcp,w.averageSnow
+      from CovidMobility as c
+      
+      inner join AverageWeather as w
+      on c.fips = w.fips
+      and c.date = w.date")
+
+
+```
+
+```{r write in population, vaccination, Testdata}
+setwd("G:/BA Daten/Final")
+
+
+### POPULATION
+population = fread("CensusEstimation/Population.csv")
+
+population [,state :=  str_remove(state,"[.]")]
+population [,population :=  str_remove(population,"[.]")]
+population [,population :=  str_remove(population,"[.]")]
+
+population [,population :=  as.numeric(population)]
+
+
+
+### VACCINATION
+vaccination = fread("VaccinationData/COVID-19_Vaccinations_in_the_United_States_Jurisdiction.csv")
+
+# change dateformat 
+vaccination[,Date :=mdy(Date) ]
+
+
+
+### COVID TESTS
+covidTest <- fread("Testdaten/TestdatenUS.csv")
+covidTest[,date :=mdy(date)]
+
+```
+
+
+```{r add vaccination, population and covdiTest to Data}
+# Median
+MedianMerged <- sqldf("Select f.V2 as short,
+      m.*,
+      v.Series_Complete_Pop_Pct as vaccinatedPercent,
+      p.population as population
+      
+      
+      from MedianMerged as m
+      
+      inner join fips as f 
+      on m.state = f.V1
+      
+      
+      
+      left join vaccination as v
+      on 
+      v.Date = m.date
+      and v.location = f.V2
+      
+      
+      inner join population as p
+      on p.state = m.state")
+
+# Tests
+MedianMerged <- sqldf("Select m.*, t.tests_combined_total as covidTests
+      from MedianMerged as m 
+      inner join covidTest as t
+      on m.date = t.date
+      and m.short = t.state
+      ")
+
+
+
+MedianMerged <- as.data.table(MedianMerged)
+
+MedianMerged$vaccinatedPercent[is.na(MedianMerged$vaccinatedPercent)] <- 0.0
+
+# Average 
+
+
+
+
+
+
+AverageMerged <- sqldf("Select f.V2 as short,
+      m.*,
+      v.Series_Complete_Pop_Pct as vaccinatedPercent,
+      p.population as population
+      
+      
+      from AverageMerged as m
+      
+      inner join fips as f 
+      on m.state = f.V1
+      
+      
+      
+      left join vaccination as v
+      on 
+      v.Date = m.date
+      and v.location = f.V2
+      
+      
+      inner join population as p
+      on p.state = m.state")
+
+
+#Vaccination 
+AverageMerged <- sqldf("Select m.*, t.tests_combined_total as covidTests
+      from AverageMerged as m 
+      inner join covidTest as t
+      on m.date = t.date
+      and m.short = t.state
+      ")
+
+
+
+AverageMerged <- as.data.table(AverageMerged)
+
+AverageMerged$vaccinatedPercent[is.na(AverageMerged$vaccinatedPercent)] <- 0.0
+
+
+
+
+
+
+```
+
+
+
+```{r add Daily Cases/Deaths and Cases/population}
+
+# Median  
+
+# Get the daily cases instead of cumultative 
+MedianMerged[,dailyCases := cases-dplyr::lag(cases),by = state]
+
+
+
+
+MedianMerged$dailyCases=
+  ifelse(is.na(MedianMerged$dailyCases),MedianMerged$cases,MedianMerged$dailyCases )
+
+# Get the deathscases instead of cumultative 
+MedianMerged[,dailyDeaths := deaths-dplyr::lag(deaths),by = state]
+
+
+
+MedianMerged$dailyDeaths=
+  ifelse(is.na(MedianMerged$dailyDeaths),MedianMerged$deaths,MedianMerged$dailyDeaths )
+
+
+
+
+
+# Cumultative Cases per Population
+MedianMerged[,CasesPerPop := (cases/population)]
+MedianMerged[,CasesDailyPerPop := (dailyCases/population)]
+
+
+
+# Average 
+
+
+# Get the daily cases instead of cumultative 
+AverageMerged[,dailyCases := cases-dplyr::lag(cases),by = state]
+
+
+
+AverageMerged$dailyCases=
+  ifelse(is.na(AverageMerged$dailyCases),AverageMerged$cases,AverageMerged$dailyCases )
+
+
+# Cumultative Cases per Population
+AverageMerged[,CasesPerPop := (cases/population)*100]
+
+
+
+```
+
+
+
+```{r add WeekNumber (each week in year gets specific number}
+MedianMerged[,weekNumber :=week(MedianMerged[,date]) ]
+
+AverageMerged[,weekNumber :=week(AverageMerged[,date]) ]
+
+```
+
+
+```{r Observations}
+observations <- sqldf('Select state,COUNT(state) from MedianMerged group by state')
+print(observations)
+
+
+observationsWeeklyPanel <- sqldf('Select state,COUNT(state) from MyPanel group by state')
+print(observationsWeeklyPanel)
+```
+
+
+
+```{r Temperature divided to get Celcius}
+
+MedianMerged[,medianTemp := medianTemp/10]
+AverageMerged[,averageTemp := averageTemp/10]
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+```{r weekly Data meaned}
+
+  # take only those in account where cases/Population smaller 1/10000
+
+  
+
+
+  
+  MedianMergedRollapply <- as.data.frame(MedianMerged[CasesPerPop>1/5000]) %>% group_by(state) %>% mutate(
+  
+  R_Retail =        rollapplyr(RetailandRecreation,7,mean,partial=TRUE),
+  
+  R_Grocery =       rollapplyr(GroceryPharmacy,7,mean,partial=TRUE),
+  
+  R_Parks =         rollapplyr(Parks,7,mean,partial=TRUE),
+  
+  R_Transit =       rollapplyr(Transit,7,mean,partial=TRUE),
+  
+  R_Work =          rollapplyr(Work,7,mean,partial=TRUE),
+  
+  R_Resident =      rollapplyr(Resident,7,mean,partial=TRUE),
+  
+  R_Deaths =        rollapplyr(dailyDeaths,7,sum,partial=TRUE), 
+  
+  R_DailyCases =    rollapplyr(dailyCases,7,sum,partial=TRUE),
+                    
+  R_CovidTests =    rollapplyr(covidTests,7,sum,partial=TRUE),
+  
+  R_Prcp =          rollapplyr(medianPrcp,7,mean,partial=TRUE),
+  
+  R_Temp =          rollapplyr(medianTemp,7,mean,partial=TRUE),
+  
+  R_Snow =          rollapplyr(medianSnow,7,mean,partial=TRUE))%>% 
+  
+  ungroup()
+  
+
+MedianMergedRollapply <- as.data.table(MedianMergedRollapply)
+MedianMergedRollapply[,daynumber:= wday(date)]
+
+  
+
+
+WeekPanel <- MedianMergedRollapply[daynumber== 1][,.(date,state,short,fips,cases,deaths,
+                                                     Retail = R_Retail,
+                                                     Grocery = R_Grocery,
+                                                     Parks = R_Parks,
+                                                     Transit= R_Transit,
+                                                     Work = R_Work,
+                                                     Resident = R_Resident,
+                                                     Deathsmean = R_Deaths,
+                                                     WeeklyCases = R_DailyCases,
+                                                     CovidTests = R_CovidTests,
+                                                     Prcp = R_Prcp,
+                                                     Temp = R_Temp,
+                                                     Snow = R_Snow,
+                                                     VaccinatedPercent = vaccinatedPercent,
+                                                     CasesPerPop,
+                                                     CasesDailyPerPop,
+                                                     Population = population,
+                                                     WeekNumber = weekNumber)]
+
+
+
+
+
+
+  
+```
+
+
+
+
+
+```{r Wilsons Week Model }
+# 
+# WeekPanel <- pdata.frame(WeekPanel,index=c("state","date"))
+# 
+# 
+# 
+# ## Create Panel like Wilson in his model with growth = dailyCases/cumCases
+# 
+# WilsonPanel = WeekPanel %>% 
+#     group_by(state) %>% 
+#     mutate( 
+#       Growth = WeeklyCases/cases,
+#       TestGrowth = (CovidTests - dplyr::lag(CovidTests)) / dplyr::lag(CovidTests) )
+# 
+# WilsonPanel <- pdata.frame(WilsonPanel,index=c("state","date"))
+# 
+# 
+# 
+# 
+# wilsonreg <- function(i) {
+# 
+# 
+# wilsonreg <-  plm(plm::lead(Growth,i)~
+#                    Growth +
+#                    plm::lag(Growth,1)+ 
+#                    Resident+
+#                    plm::lag(Resident,1)+
+#                    Temp+
+#                    plm::lag(Temp,1)+
+#                    Prcp+
+#                    plm::lag(Prcp,1)+
+#                    Temp+
+#                    plm::lag(Temp,1)+
+#                    Snow+
+#                    plm::lag(Snow,1)+
+#                    CasesPerPop+
+#                    factor(WeekNumber)+
+#                   ,data = WilsonPanel,model="within" )
+#        
+# return(summary(wilsonreg))
+#           
+#                    
+#                    
+# }
+# 
+# wilsonreg(2)
+
+```
+
+```{r SeasonEffects, include=FALSE}
+
+
+getSeason <- function(DATES) {
+    WS <- as.Date("2012-12-15", format = "%Y-%m-%d") # Winter Solstice
+    SE <- as.Date("2012-3-15",  format = "%Y-%m-%d") # Spring Equinox
+    SS <- as.Date("2012-6-15",  format = "%Y-%m-%d") # Summer Solstice
+    FE <- as.Date("2012-9-15",  format = "%Y-%m-%d") # Fall Equinox
+
+    # Convert dates from any year to 2012 dates
+    d <- as.Date(strftime(DATES, format="2012-%m-%d"))
+
+    ifelse (d >= WS | d < SE, "Winter",
+      ifelse (d >= SE & d < SS, "Spring",
+        ifelse (d >= SS & d < FE, "Summer", "Fall")))
+}
+
+
+
+
+```
+
+
+
+
+#Business State Pattern Data
+```{r }
+# read in patterdata
+setwd("G:/BA Daten/Final/BusinessPattern")
+SPS = read.csv("State_business_patterns_2019.csv",header=TRUE, dec= ",")
+
+SPS_code = substr(SPS$naics,start = 3 , stop = 6 )
+
+# Only want the pattern on a summary level | not going into detail
+SPS_summary = SPS[SPS_code == "----", ]
+SPS_all_organizations = SPS_summary[SPS_summary$lfo == "-",]
+
+# EMP is for employees in mid march and EMP_NF is their corresponding noise flag 
+# NOTE: Noise Flag definitions (fields ending in NF) are:
+# 
+#         G       0 to < 2% noise (low noise)
+#         H       2 to < 5% noise (medium noise)
+# 	J	>= 5% noise (high noise)
+# 	N	Not available or not comparable. Employment or payroll field set to zero.
+
+rm(list = c("SPS_code","SPS_summary","SPS"))
+
+```
+
+```{r Business Pattern extract data No.2, eval=FALSE, include=FALSE}
+
+# Read in the FIPS codes 
+
+
+
+
+SPS_all_organizations = sqldf("Select F.V1,S.* from SPS_all_organizations as S INNER JOIN fips as F ON S.fipstate = F.V3")
+
+
+
+SPS_all_organizations = SPS_all_organizations %>% 
+  rename(
+    state = V1
+    )
+
+
+head(SPS_all_organizations)
+
+SPS_PC = SPS_all_organizations[,c(1,2,3,5,6)]
+count(unique(SPS_PC$state))
+
+
+ # Das kann doch nicht so schwer sein meine Güte !!!!
+# ICh brauch die Daten von den ersten 21 zeilen jeweils! --> reshape !!!
+
+SPS_K_Means = reshape (SPS_PC[,-4], idvar = c("state","fipstate"),timevar = "naics",direction = "wide")
+
+```
+
+```{r getting the descriptions of the NAICS codes, eval=FALSE, include=FALSE}
+# name the variables according to their industry 
+# read in the naics description 
+setwd("G:/BA Daten/Business_Patterns")
+naics_explanation = read.csv("naics2017.csv")
+
+
+# Filtering for the general naics 
+filternaics = substr(naics_explanation$NAICS,start = 3, stop=6)
+naics_explanation_general = naics_explanation[filternaics == "----",]
+
+naics_explanation_general
+
+
+rm(list = c("naics_explanation","filternaics"))
+```
+
+```{r getting rid of characters in names and calculating relative values, eval=FALSE, include=FALSE}
+# because the explanation is in terms of absolute values i need to get relative values  
+# hence dividing through all employees
+
+
+
+head(SPS_K_Means)
+
+
+
+
+
+# Getting rid of the --- and . in the names 
+names(SPS_K_Means) = str_remove_all(names(SPS_K_Means), "[.-]") # removes all given characters
+
+
+# calculating the relative values 
+
+emp_vector = as.vector(SPS_K_Means$emp)
+industrymatrix = as.matrix(SPS_K_Means[,-c(1,2,3)])
+
+
+rel_industry = industrymatrix / emp_vector
+  
+## The different sections in relative values to the general employment number 
+rel_industry  
+  
+                   
+
+
+rm(list =c("emp_vector","industrymatrix"))
+
+
+
+
+rel_industry = as.data.table(rel_industry)
+
+# in Prozentpunkten
+rel_industry = rel_industry * 100
+
+#naming again 
+industry_state_names = SPS_K_Means$state
+relative_values = cbind(industry_state_names,rel_industry)
+
+relative_values = relative_values %>%
+  rename(
+    state = industry_state_names
+  )
+
+head(relative_values)
+
+# Checking whether every row has 100 % 
+apply(relative_values[,-1],1,sum)
+
+```
+
+
+```{r K-Mean Clustering}
+kmeans <- kmeans(relative_values[,-1],3,nstart = 35)
+relative_values$cluster = as.character( kmeans$cluster)
+
+# attach to MyPanelCluster
+# MyPanelCluster <- sqldf("Select m.*,c.cluster from MyPanel as m inner join relative_values as c on c.state = m.state")
+```
+
+
+
+```{r Principal component for states, eval=FALSE, include=FALSE}
+# read in again 
+
+PC = prcomp(relative_values[,c(-1,-22)])
+
+PcData = PC$x
+
+ggplot(data = as.data.frame(PcData),aes(x=PC1,y=PC2, color = kmeans$cluster))+
+  geom_point(color= kmeans$cluster)+
+  labs(title="Principal Component with K-Mean Clustering",
+       x="first Principal Component",
+       y="second Principal Component",
+       subtitle="Using Principal Component to visualize the Clustering of the industry distribution in each State")
+
+
+
+
+
+
+```
+
+```{r GGplot of Cluster with different k means Statelevel }
+for (i in 1:8){
+
+loopkmeans <- kmeans(relative_values[,c(-1,-22)],i,nstart = 35)
+stateloop <- relative_values
+stateloop$cluster = as.character(loopkmeans$cluster)
+
+LoopPCstate = prcomp(stateloop[,c(-1,-22)])
+
+LoopPcStateData = LoopPCstate$x
+
+
+LoopPcStateData <- as.data.table(LoopPcStateData)
+LoopPcStateData <- cbind(LoopPcStateData,cluster = stateloop$cluster, state = stateloop$state)
+
+
+# get the absolute and relative data points in each cluster 
+# print(table(LoopPcData$cluster))
+ print(prop.table(table(LoopPcStateData$cluster)))
+
+
+loopplot <- ggplot(LoopPcStateData,aes(x=PC1,y=PC2,color=cluster))+
+  geom_point()+
+  labs(subtitle=paste0("k= ",i),
+       # tag = paste(i),
+       x="PC1",
+       y="PC2")
+        
+assign(paste0("StateClusterplot",i),loopplot)
+
+
+}
+
+# loopplot <- ggplot(LoopPcData,aes(x=PC1,y=PC2))+
+#   geom_point(aes(color=cluster))+
+#   labs(subtitle=paste0("Cluster with k= ",i),
+#        x="PC1",
+#        y="PC2")
+# 
+# assign(paste0("ClusterPlot",i),loopplot)
+
+
+
+
+
+```
+
+```{r}
+library(ggpubr)
+
+
+ggarrange(StateClusterplot3,StateClusterplot4,
+          StateClusterplot5,StateClusterplot6,ncol=2,nrow=2)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+```{r Renaming colnames of relative values }
+
+
+colnames(relative_values) =c("state","Foodgathering","MiningOil","Utilities","Construction","Manufacturing","Wholesale Trade","RetailTrade","TransportationWaerhousing","Information","FinanceInsurance","RealEstateCo","ProfessionalScientific","Management","Administrative","EducationalService","HealthCare","ArtsEntertainment","AccommodationFoodServices","OtherServices","NotClassified","cluster")
+
+
+```
+
+
+
+```{r take a look at clustering}
+relative_values <- as.data.table(relative_values)
+clusterOneMean = apply(relative_values[cluster == 2][,c(2:21)],2,mean)
+clusterTwoMean = apply(relative_values[cluster == 1][,c(2:21)],2,mean)
+clusterThreeMean = apply(relative_values[cluster == 3][,c(2:21)],2,mean)
+
+
+
+View(rbind(clusterOneMean,clusterTwoMean,clusterThreeMean))
+```
+
+```{r Overview of clusters}
+clustertwo = print(relative_values[cluster == 1 ][,state])
+clusterone = relative_values[cluster == 2][,state]
+clusterthree = relative_values[cluster == 3][,state]
+
+
+print(clusterone)
+print(clustertwo)
+print(clusterthree)
+
+```
+
+```{r get season}
+
+
+
+getSeason <- function(DATES) {
+    WS <- as.Date("2012-12-15", format = "%Y-%m-%d") # Winter Solstice
+    SE <- as.Date("2012-3-15",  format = "%Y-%m-%d") # Spring Equinox
+    SS <- as.Date("2012-6-15",  format = "%Y-%m-%d") # Summer Solstice
+    FE <- as.Date("2012-9-15",  format = "%Y-%m-%d") # Fall Equinox
+
+    # Convert dates from any year to 2012 dates
+    d <- as.Date(strftime(DATES, format="2012-%m-%d"))
+
+    ifelse (d >= WS | d < SE, "Winter",
+      ifelse (d >= SE & d < SS, "Spring",
+        ifelse (d >= SS & d < FE, "Summer", "Fall")))
+}
+
+
+
+
+```
+
+
+```{r My model}
+
+
+
+MyPanel = WeekPanel %>% 
+    group_by(state) %>% 
+    mutate( 
+      Growth = (WeeklyCases - dplyr::lag(WeeklyCases,1))/   dplyr::lag(WeeklyCases,1),
+      lagGrowth = dplyr::lag(Growth,1),
+      lagResident = dplyr::lag(Resident,1),
+      lagTemp = dplyr::lag(Temp,1),
+      lagPRCP = dplyr::lag(Prcp,1),
+      lagSnow = dplyr::lag(Snow,1),
+      season = getSeason(date),
+      TestGrowth = (CovidTests - dplyr::lag(CovidTests,1)) / dplyr::lag(CovidTests,1) ) %>% ungroup()
+
+
+
+MyPanel <- as.data.table(MyPanel)[is.na(Growth) != TRUE ][Growth <5 ]
+# MyPanel <- pdata.frame(MyPanel,index=c("state","date"))
+
+
+MyPanel[,season:= getSeason(date)]
+
+
+myModellm <- lm(Growth ~ lagGrowth
+              +lagResident
+              +Temp
+              +lagTemp
+              +Snow
+              +lagSnow
+              +Prcp
+              +lagPRCP
+              +CasesPerPop
+              +factor(season)
+              +factor(cluster)
+              ,data = MyPanelCluster)
+
+summary(myModellm)
+
+
+myModelplm <- plm(plm::lead(Growth,1)~
+                   Growth +
+                   plm::lag(Growth)+ 
+                   Resident+
+                   plm::lag(Resident)+
+                   Temp+
+                   plm::lag(Temp)+
+                   Prcp+
+                   plm::lag(Prcp)+
+                   Snow+  
+                   plm::lag(Snow)+
+                   factor(WeekNumber)+
+                   CasesPerPop
+                   ,data = MyPanelCluster,index=c("state","date"),model="within")
+
+
+summary(myModelplm)
+
+
+Model <- function(i) {
+
+myModel <- plm(lead(Growth,i)~
+                   Growth +
+                   lag(Growth)+ 
+                   Resident+
+                   lag(Resident)+
+                   Temp+
+                   lag(Temp)+
+                   Prcp+
+                   lag(Prcp)+
+                   Snow+  
+                   lag(Snow)+
+                   CasesPerPop+
+                   factor(WeekNumber)
+                   ,data = MyPanel, model="within",index=c("state"))
+
+
+return(summary(myModel))
+
+
+}
+Model(2)
+
+
+
+```
+
+
+
+
+```{r Timeseries graph New York}
+
+
+
+ResidentPlot <- function(statename){
+  
+  
+  ggplot(data=MedianMerged[state == statename ],aes(x=date))+
+      geom_line(aes(y=Resident, color="deepskyblue2"))+
+      xlab("date")+
+      ylab("People at resident relative to baseline")+
+      
+     ggtitle(paste0("Daily mobility at resident ","in ",statename))+
+     
+     geom_hline(yintercept = 0,linetype= "dotted",color ="red")
+  
+  
+  
+  
+}
+
+
+ResidentPlot <- function(statename){
+  
+  
+  ggplot(data=MedianMerged[state == statename ],aes(x=date))+
+      geom_line(aes(y=Resident))+
+      xlab("date")+
+      ylab("Resident percent")+
+      
+     ggtitle(paste0("Daily mobility at resident in","  ",statename))+
+     
+     geom_hline(yintercept = 0,linetype= "dotted",color ="red")
+  
+  
+  
+  
+}
+
+
+
+
+
+
+
+
+
+
+
+
+ResidentPlot('New York')
+
+
+WorkPlot <- function(statename){
+  
+  
+  ggplot(data=MedianMerged[state == statename ],aes(x=date))+
+      geom_line(aes(y=Work),color="darksalmon")+
+      xlab("date")+
+      ylab("Work percent")+
+      
+     ggtitle(paste0("Daily mobility at work ","in ",statename))+
+     
+     geom_hline(yintercept = 0,linetype= "dotted",color ="red")
+  
+  
+  
+  
+}
+
+
+
+
+WorkPlot("New York")
+
+# Export plots in one Picture
+library(ggpubr)
+ggarrange(WorkPlot("New York"),ResidentPlot("New York"),nrow=2)
+
+
+```
+
+
+
+```{r Missing values in Mobility}
+
+
+sum(is.na(MedianMerged[,Transit]))
+sum(is.na(MedianMerged[,Parks]))
+sum(is.na(MedianMerged[,Resident]))
+sum(is.na(MedianMerged[,GroceryPharmacy]))
+sum(is.na(MedianMerged[,RetailandRecreation]))
+sum(is.na(MedianMerged[,Work]))
+
+
+MedianMerged[,sum(dailyCases),by= weekdays(date)]
+MedianMerged[is.na(covidTests)== FALSE][,sum(covidTests),by= weekdays(date)]
+
+```
+
+
+
+
+```{r Histplot for weather}
+# Viele Null werte 
+ggplot(precipitation,aes(VALUE))+
+  geom_histogram(bins = 200)
+
+
+ggplot(snow[VALUE> 300],aes(VALUE))+
+  geom_histogram(bins = 200)
+
+
+
+
+# observations are zero prcp and snow 
+nrow(snow[VALUE == 0])/nrow(snow)
+nrow(precipitation[VALUE == 0])/nrow(precipitation)
+
+```
+
+
+```{r}
+CovidUS = fread("G:/BA Daten/Final/Covid/Covid_US.csv")
+CovidUS[,dailyCases := cases-shift(cases)]
+
+
+
+
+
+
+CovidUS[, c("dailyCaseslag1","dailyCaseslag2","dailyCaseslag3","dailyCaseslag4","dailyCaseslag5","dailyCaseslag6") := 
+                      .(shift(dailyCases, 1L, fill = NA, type = "lag"),
+                        shift(dailyCases, 2L, fill = NA, type = "lag"),
+                        shift(dailyCases, 3L, fill = NA, type = "lag"),
+                        shift(dailyCases, 4L, fill = NA, type = "lag"),
+                        shift(dailyCases, 5L, fill = NA, type = "lag"),
+                        shift(dailyCases, 6L, fill = NA, type = "lag")
+                      )]
+
+
+CovidUS[,growth:= 
+                  ( (log(
+                    
+                    (dailyCases+
+                       dailyCaseslag1+
+                       dailyCaseslag2)/3))
+                /
+                  
+                  (log(
+                      (dailyCases+
+                       dailyCaseslag1+
+                       dailyCaseslag2+
+                       dailyCaseslag3+
+                       dailyCaseslag4+
+                       dailyCaseslag5+
+                       dailyCaseslag6)/7)) -1)*100]
+
+
+
+
+ CovidUS <- CovidUS  %>% mutate(
+  
+  
+  
+  R_DailyCases =    rollapplyr(dailyCases,7,sum,partial=TRUE))
+   
+CovidUS[,casemean := R_DailyCases/7]
+CovidUS[,season:=getSeason(date)]
+
+
+ggplot(data=CovidUS[cases>610709],aes(x=date))+
+  geom_line(size=2,aes(y=log(casemean),group = season))
+  # geom_line(aes(y=dailyCases),color="darkorange2")
+
+seasonplotUS <- ggplot(data=CovidUS[cases>610709][date<= "2021-08-04"],aes(x=date))+
+  geom_rect(aes(NULL, NULL, 
+    xmin=date-0.5, xmax=date+0.5, 
+    ymin=min(casemean), ymax=max(casemean), 
+    fill=season))+
+  geom_line(col="deepskyblue4",size=1.5,aes(y=casemean))+
+  ylab("Seven day average")
+
+
+
+```
+
+
+```{r State Cluster comparison}
+## Standardize 
+SCompareIndustry <- scale(relative_values[,c(-1,-22)],center= TRUE,scale = TRUE)
+
+SCompareIndustry <- as.data.table(SCompareIndustry)  
+SCompareIndustry <- cbind(SCompareIndustry,cluster = relative_values[,cluster])   
+
+
+
+
+SStandardizeValues <- cbind(1:20,colMeans(SCompareIndustry[cluster == 1][,c(1:20)]),
+    colMeans(SCompareIndustry[cluster %in% c(2,3)][,c(1:20)]))
+    
+
+
+
+
+
+```
+
